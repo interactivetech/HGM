@@ -59,6 +59,17 @@ evaluation:
   # Use Polyglot benchmark instead of SWE-bench
   polyglot: false
 
+# Research instrumentation
+research:
+  # Write structured HGM research events and snapshots
+  enabled: true
+
+  # Reserve room for future policy-specific logging controls
+  log_policy_details: true
+
+  # Reserved for future throttling; current implementation writes every snapshot call
+  snapshot_every_n_events: 1
+
 # Path Configuration
 paths:
   # Output directory for results (if null, will be auto-generated)

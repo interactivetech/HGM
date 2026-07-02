@@ -12,16 +12,35 @@ def load_hgm_metadata(hgm_metadata_path, last_only=False):
         raise FileNotFoundError(f"Metadata file not found at {hgm_metadata_path}")
     # Read all JSON entries from the metadata file
     content = read_file(hgm_metadata_path)
-    json_entries = content.split("\n{")
-    # Parse all JSON entries
+    stripped = content.strip()
+    if not stripped:
+        raise ValueError(f"No JSON content found in metadata file: {hgm_metadata_path}")
+
+    # Prefer strict JSONL parsing first.
     hgm_metadata = []
-    for json_entry in json_entries:
-        # Add back the { if it was removed by split
-        if not json_entry.startswith("{"):
-            json_entry = "{" + json_entry
-        # Parse the JSON entry
-        metadata = json.loads(json_entry)
-        hgm_metadata.append(metadata)
+    line_parse_failed = False
+    for line in stripped.splitlines():
+        entry = line.strip()
+        if not entry:
+            continue
+        try:
+            hgm_metadata.append(json.loads(entry))
+        except json.JSONDecodeError:
+            line_parse_failed = True
+            hgm_metadata = []
+            break
+
+    if line_parse_failed or not hgm_metadata:
+        # Fallback for legacy pretty-printed archives that contain multi-line JSON objects.
+        decoder = json.JSONDecoder()
+        index = 0
+        while index < len(stripped):
+            while index < len(stripped) and stripped[index].isspace():
+                index += 1
+            if index >= len(stripped):
+                break
+            metadata, index = decoder.raw_decode(stripped, index)
+            hgm_metadata.append(metadata)
 
     if last_only:
         return hgm_metadata[-1]

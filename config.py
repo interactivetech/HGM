@@ -48,6 +48,14 @@ class EvaluationConfig:
 
 
 @dataclass
+class ResearchConfig:
+    """Configuration for research instrumentation."""
+    enabled: bool = True
+    log_policy_details: bool = True
+    snapshot_every_n_events: int = 1
+
+
+@dataclass
 class PathConfig:
     """Configuration for file paths and directories."""
     output_dir: Optional[str] = None
@@ -62,6 +70,7 @@ class HGMConfig:
     optimization: OptimizationConfig = field(default_factory=OptimizationConfig)
     execution: ExecutionConfig = field(default_factory=ExecutionConfig)
     evaluation: EvaluationConfig = field(default_factory=EvaluationConfig)
+    research: ResearchConfig = field(default_factory=ResearchConfig)
     paths: PathConfig = field(default_factory=PathConfig)
 
     @classmethod
@@ -88,6 +97,7 @@ class HGMConfig:
             optimization_config = OptimizationConfig(**config_data.get('optimization', {}))
             execution_config = ExecutionConfig(**config_data.get('execution', {}))
             evaluation_config = EvaluationConfig(**config_data.get('evaluation', {}))
+            research_config = ResearchConfig(**config_data.get('research', {}))
             paths_config = PathConfig(**config_data.get('paths', {}))
             
             return cls(
@@ -95,6 +105,7 @@ class HGMConfig:
                 optimization=optimization_config,
                 execution=execution_config,
                 evaluation=evaluation_config,
+                research=research_config,
                 paths=paths_config
             )
         except Exception as e:
@@ -179,6 +190,11 @@ class HGMConfig:
             'evaluation': {
                 'full_eval': self.evaluation.full_eval,
                 'polyglot': self.evaluation.polyglot,
+            },
+            'research': {
+                'enabled': self.research.enabled,
+                'log_policy_details': self.research.log_policy_details,
+                'snapshot_every_n_events': self.research.snapshot_every_n_events,
             },
             'paths': {
                 'output_dir': self.paths.output_dir,

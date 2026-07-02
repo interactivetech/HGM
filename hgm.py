@@ -15,6 +15,7 @@ from collections import defaultdict
 from concurrent.futures import (ProcessPoolExecutor, ThreadPoolExecutor,
                                 TimeoutError, as_completed)
 from statistics import stdev
+from types import SimpleNamespace
 
 import numpy as np
 from datasets import load_dataset
@@ -26,6 +27,12 @@ from tree import Node
 from utils.common_utils import load_json_file
 from utils.docker_utils import copy_src_files, setup_logger
 from utils.evo_utils import load_hgm_metadata
+from utils.hgm_research_logger import (
+    ResearchLogger,
+    build_candidate_policy_summary,
+    build_node_stats,
+    _sanitize_jsonable,
+)
 
 
 def apply_vllm_env_overrides(llm_cfg):
@@ -40,26 +47,156 @@ def apply_vllm_env_overrides(llm_cfg):
     return {key: os.getenv(key) for key in env_updates}
 
 
-def update_metadata(output_dir, n_task_evals):
-    with open(os.path.join(output_dir, "hgm_metadata.jsonl"), "a") as f:
-        f.write(
+research_logger = None
+
+
+def _append_jsonl_record(path, record):
+    with open(path, "a", encoding="utf-8") as handle:
+        handle.write(
             json.dumps(
-                {
-                    "n_task_evals": n_task_evals,
-                    "nodes": [
-                        node.save_as_dict()
-                        for node in hgm_utils.nodes.values()
-                        if node.commit_id != "initial"
-                    ],
-                },
-                indent=2,
+                _sanitize_jsonable(record),
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=False,
+                allow_nan=False,
             )
             + "\n"
         )
+        handle.flush()
+
+
+def update_metadata(output_dir, n_task_evals, snapshot_extra=None, research_logger_obj=None):
+    _append_jsonl_record(
+        os.path.join(output_dir, "hgm_metadata.jsonl"),
+        {
+            "timestamp": time.time(),
+            "run_id": os.path.basename(os.path.normpath(output_dir)),
+            "output_dir": output_dir,
+            "n_task_evals": n_task_evals,
+            "nodes": [
+                node.save_as_dict()
+                for node in hgm_utils.nodes.values()
+                if node.commit_id != "initial"
+            ],
+        },
+    )
     json.dump(
         hgm_utils.init_evaluated_tasks,
         open(os.path.join(output_dir, "init_evaluated_tasks.json"), "w"),
     )
+    logger_obj = research_logger_obj if research_logger_obj is not None else research_logger
+    if logger_obj is not None:
+        try:
+            logger_obj.write_snapshot(
+                hgm_utils.nodes.values(),
+                n_task_evals,
+                extra=snapshot_extra,
+            )
+        except Exception:
+            pass
+
+
+def _preview_text(value, limit=400):
+    if value is None:
+        return None
+    text = str(value).strip()
+    if len(text) <= limit:
+        return text
+    return text[:limit] + "...<truncated>"
+
+
+def _summarize_diff_file(diff_path):
+    summary = {"patch_line_count": None, "changed_files": []}
+    if not diff_path or not os.path.exists(diff_path):
+        return summary
+    try:
+        with open(diff_path, "r", encoding="utf-8", errors="replace") as handle:
+            diff_text = handle.read()
+        summary["patch_line_count"] = len(diff_text.splitlines())
+        changed_files = []
+        for line in diff_text.splitlines():
+            if line.startswith("diff --git a/"):
+                parts = line.split()
+                if len(parts) >= 4 and parts[3].startswith("b/"):
+                    changed_files.append(parts[3][2:])
+        summary["changed_files"] = list(dict.fromkeys(changed_files))
+    except Exception:
+        pass
+    return summary
+
+
+def _summarize_child_artifacts(output_dir, child_commit):
+    if not child_commit or child_commit == "failed":
+        return {
+            "child_run_dir": None,
+            "child_metadata_path": None,
+            "self_evo_path": None,
+            "model_patch_path": None,
+            "diagnosis_entry": None,
+            "problem_statement_preview": None,
+            "patch_line_count": None,
+            "changed_files": [],
+        }
+    child_run_dir = os.path.join(output_dir, child_commit)
+    metadata_path = os.path.join(child_run_dir, "metadata.json")
+    self_evo_path = os.path.join(child_run_dir, "self_evo.md")
+    model_patch_path = os.path.join(child_run_dir, "model_patch.diff")
+    metadata = {}
+    if os.path.exists(metadata_path):
+        try:
+            metadata = load_json_file(metadata_path)
+        except Exception:
+            metadata = {}
+    diff_summary = _summarize_diff_file(model_patch_path)
+    return {
+        "child_run_dir": child_run_dir if os.path.exists(child_run_dir) else None,
+        "child_metadata_path": metadata_path if os.path.exists(metadata_path) else None,
+        "self_evo_path": self_evo_path if os.path.exists(self_evo_path) else None,
+        "model_patch_path": model_patch_path if os.path.exists(model_patch_path) else None,
+        "diagnosis_entry": metadata.get("entry"),
+        "problem_statement_preview": _preview_text(metadata.get("problem_statement")),
+        "patch_line_count": diff_summary["patch_line_count"],
+        "changed_files": diff_summary["changed_files"],
+    }
+
+
+def TS_sample(
+    evals,
+    return_details=False,
+    opt_cfg=None,
+    exec_cfg=None,
+    current_n_task_evals=None,
+):
+    if len(evals) == 0:
+        raise ValueError("TS_sample received an empty evaluation list")
+
+    opt_cfg = opt_cfg or SimpleNamespace(cool_down=False, beta=1.0)
+    if exec_cfg is None:
+        exec_cfg = SimpleNamespace(max_task_evals=max(len(evals), 1))
+    if current_n_task_evals is None:
+        current_n_task_evals = hgm_utils.n_task_evals
+
+    alphas = [1 + np.sum(de) for de in evals]
+    betas = [1 + len(de) - np.sum(de) for de in evals]
+    if opt_cfg.cool_down:
+        cooldown_scale = (
+            10000
+            if exec_cfg.max_task_evals == current_n_task_evals
+            else exec_cfg.max_task_evals**opt_cfg.beta
+            / (exec_cfg.max_task_evals - current_n_task_evals) ** opt_cfg.beta
+        )
+        alphas = np.array(alphas) * cooldown_scale
+        betas = np.array(betas) * cooldown_scale
+    thetas = np.random.beta(alphas, betas)
+    selected_index = int(np.argmax(thetas))
+    if return_details:
+        return selected_index, {
+            "alphas": [float(value) for value in np.asarray(alphas).tolist()],
+            "betas": [float(value) for value in np.asarray(betas).tolist()],
+            "thetas": [float(value) for value in np.asarray(thetas).tolist()],
+            "selected_index": selected_index,
+        }
+    return selected_index
 
 
 def initialize_run(
@@ -338,6 +475,7 @@ def main():
     opt_cfg = config.optimization
     exec_cfg = config.execution
     eval_cfg = config.evaluation
+    research_cfg = config.research
     path_cfg = config.paths
     vllm_env = apply_vllm_env_overrides(llm_cfg)
 
@@ -399,6 +537,23 @@ def main():
     self_improve_step.self_improve_llm = llm_cfg.self_improve_llm
     # Initialize logger early
     logger = setup_logger(os.path.join(output_dir, "hgm_outer.log"))
+    global research_logger
+    research_logger = ResearchLogger(output_dir, enabled=research_cfg.enabled)
+    research_logger.log_event(
+        "run_started",
+        {
+            "max_task_evals": exec_cfg.max_task_evals,
+            "max_workers": exec_cfg.max_workers,
+            "initial_eval_tasks": exec_cfg.initial_eval_tasks,
+            "alpha": opt_cfg.alpha,
+            "beta": opt_cfg.beta,
+            "cool_down": opt_cfg.cool_down,
+            "eval_random_level": opt_cfg.eval_random_level,
+            "n_pseudo_descendant_evals": opt_cfg.n_pseudo_descendant_evals,
+            "research_enabled": research_cfg.enabled,
+            "log_policy_details": research_cfg.log_policy_details,
+        },
+    )
     # SWE issues to consider
     if not eval_cfg.polyglot:
         if eval_cfg.full_eval:
@@ -439,32 +594,14 @@ def main():
         f"VLLM_MODEL={vllm_env.get('VLLM_MODEL')}"
     )
 
-    def TS_sample(evals):
-        if len(evals) == 0:
-            raise ValueError("TS_sample received an empty evaluation list")
-        alphas = [1 + np.sum(de) for de in evals]
-        betas = [1 + len(de) - np.sum(de) for de in evals]
-        if opt_cfg.cool_down:
-            alphas = np.array(alphas) * (
-                10000
-                if exec_cfg.max_task_evals == hgm_utils.n_task_evals
-                else exec_cfg.max_task_evals**opt_cfg.beta
-                / (exec_cfg.max_task_evals - hgm_utils.n_task_evals) ** opt_cfg.beta
-            )
-            betas = np.array(betas) * (
-                10000
-                if exec_cfg.max_task_evals == hgm_utils.n_task_evals
-                else exec_cfg.max_task_evals**opt_cfg.beta
-                / (exec_cfg.max_task_evals - hgm_utils.n_task_evals) ** opt_cfg.beta
-            )
-        thetas = np.random.beta(alphas, betas)
-        return np.argmax(thetas)
-
     n_pending_expands = 0
     n_pending_measures = 0
     lock = threading.Lock()
 
     def expand():
+        decision_payload = None
+        selected_node = None
+        selected_index = None
         with lock:
             nodes = [
                 node
@@ -473,21 +610,84 @@ def main():
             ]
             if len(nodes) == 0:
                 nodes = [hgm_utils.nodes[0]]
+            candidate_summary = (
+                build_candidate_policy_summary(nodes, node_map=hgm_utils.nodes)
+                if research_cfg.enabled and research_cfg.log_policy_details
+                else None
+            )
             decendant_evals = [
                 node.get_decendant_evals(num_pseudo=opt_cfg.n_pseudo_descendant_evals)
                 for node in nodes
             ]
-            selected_node = nodes[TS_sample(decendant_evals)]
+            selected_index, ts_details = TS_sample(
+                decendant_evals,
+                return_details=True,
+                opt_cfg=opt_cfg,
+                exec_cfg=exec_cfg,
+                current_n_task_evals=hgm_utils.n_task_evals,
+            )
+            selected_node = nodes[selected_index]
+            if candidate_summary is not None and research_logger is not None:
+                decision_payload = {
+                    "current_n_task_evals": hgm_utils.n_task_evals,
+                    **candidate_summary,
+                    "thompson": ts_details,
+                    "selected_node_id": getattr(selected_node, "id", None),
+                    "selected_commit_id": getattr(selected_node, "commit_id", None),
+                    "selected_index": selected_index,
+                    "selected_same_as_greedy_current_performance": (
+                        getattr(selected_node, "id", None)
+                        == candidate_summary["greedy_current_performance_node_id"]
+                    ),
+                    "selected_same_as_greedy_estimated_cmp": (
+                        getattr(selected_node, "id", None)
+                        == candidate_summary["greedy_estimated_cmp_node_id"]
+                    ),
+                    "config": {
+                        "alpha": opt_cfg.alpha,
+                        "beta": opt_cfg.beta,
+                        "cool_down": opt_cfg.cool_down,
+                        "n_pseudo_descendant_evals": opt_cfg.n_pseudo_descendant_evals,
+                    },
+                    "n_pending_expands": n_pending_expands,
+                    "n_pending_measures": n_pending_measures,
+                }
+                research_logger.log_event("expansion_decision", decision_payload)
+        child_start = time.time()
         child_commit = hgm_utils.sample_child(
             selected_node.commit_id,
             image_name=path_cfg.initial_agent_name + ":latest",
         )
+        child_elapsed = time.time() - child_start
+        child_artifacts = _summarize_child_artifacts(output_dir, child_commit)
+        child_node = None
         with lock:
             if child_commit != "failed":
-                selected_node.children.append(
-                    Node(child_commit, parent_id=selected_node.id)
+                child_node = Node(child_commit, parent_id=selected_node.id)
+                selected_node.children.append(child_node)
+                update_metadata(
+                    output_dir,
+                    hgm_utils.n_task_evals,
+                    snapshot_extra={
+                        "trigger_event": "expansion_result",
+                        "parent_node_id": getattr(selected_node, "id", None),
+                        "parent_commit_id": getattr(selected_node, "commit_id", None),
+                        "child_commit_id": child_commit,
+                    },
                 )
-                update_metadata(output_dir, hgm_utils.n_task_evals)
+        if research_logger is not None and research_cfg.log_policy_details:
+            research_logger.log_event(
+                "expansion_result",
+                {
+                    "parent_node_id": getattr(selected_node, "id", None),
+                    "parent_commit_id": getattr(selected_node, "commit_id", None),
+                    "child_commit_id": child_commit,
+                    "status": "success" if child_commit != "failed" else "failed",
+                    "elapsed_seconds": child_elapsed,
+                    "new_child_id": getattr(child_node, "id", None),
+                    **child_artifacts,
+                },
+            )
 
     def sample():
         time.sleep(random.random())
@@ -510,6 +710,7 @@ def main():
                 n_pending_expands -= 1
                 return
 
+        decision_payload = None
         with lock:
             nodes = hgm_utils.nodes[0].get_sub_tree(fn=lambda node: node)
             nodes = [
@@ -518,7 +719,19 @@ def main():
             evals = [node.utility_measures for node in nodes]
             if len(evals) == 0:
                 return
-            selected_node = nodes[TS_sample(evals)]
+            candidate_summary = (
+                build_candidate_policy_summary(nodes, node_map=hgm_utils.nodes)
+                if research_cfg.enabled and research_cfg.log_policy_details
+                else None
+            )
+            selected_index, ts_details = TS_sample(
+                evals,
+                return_details=True,
+                opt_cfg=opt_cfg,
+                exec_cfg=exec_cfg,
+                current_n_task_evals=hgm_utils.n_task_evals,
+            )
+            selected_node = nodes[selected_index]
             available_tasks = list(
                 [
                     task
@@ -528,22 +741,87 @@ def main():
             )
             if len(available_tasks) == 0:
                 return
-            if random.random() < opt_cfg.eval_random_level:
+            task_choice_random = random.random() < opt_cfg.eval_random_level
+            if task_choice_random:
                 selected_node_tasks = random.choice(available_tasks)
+                task_choice_mode = "random"
             else:
                 selected_node_tasks = available_tasks[0]
+                task_choice_mode = "fixed"
             submitted_ids[selected_node.id].add(selected_node_tasks)
             n_pending_measures += 1
+            if candidate_summary is not None and research_logger is not None:
+                decision_payload = {
+                    "current_n_task_evals": hgm_utils.n_task_evals,
+                    **candidate_summary,
+                    "thompson": ts_details,
+                    "selected_node_id": getattr(selected_node, "id", None),
+                    "selected_commit_id": getattr(selected_node, "commit_id", None),
+                    "selected_task_id": selected_node_tasks,
+                    "selected_index": selected_index,
+                    "greedy_current_performance_node_id": candidate_summary[
+                        "greedy_current_performance_node_id"
+                    ],
+                    "selected_same_as_greedy_current_performance": (
+                        getattr(selected_node, "id", None)
+                        == candidate_summary["greedy_current_performance_node_id"]
+                    ),
+                    "available_task_count": len(available_tasks),
+                    "eval_random_level": opt_cfg.eval_random_level,
+                    "task_choice_random": task_choice_random,
+                    "task_choice_mode": task_choice_mode,
+                }
+                research_logger.log_event("evaluation_decision", decision_payload)
 
+        eval_start = time.time()
         evals = hgm_utils.eval_agent(
             selected_node.commit_id,
             tasks=[selected_node_tasks],
             init_agent_path=src_path,
         )
+        eval_elapsed = time.time() - eval_start
+        selected_node_stats = None
         with lock:
             selected_node.utility_measures += evals
             n_pending_measures -= 1
-            update_metadata(output_dir, hgm_utils.n_task_evals)
+            selected_node_stats = build_node_stats(selected_node, node_map=hgm_utils.nodes)
+            update_metadata(
+                output_dir,
+                hgm_utils.n_task_evals,
+                snapshot_extra={
+                    "trigger_event": "evaluation_result",
+                    "selected_node_id": getattr(selected_node, "id", None),
+                    "selected_commit_id": getattr(selected_node, "commit_id", None),
+                    "selected_task_id": selected_node_tasks,
+                },
+            )
+        if research_logger is not None and research_cfg.log_policy_details:
+            research_logger.log_event(
+                "evaluation_result",
+                {
+                    "selected_node_id": getattr(selected_node, "id", None),
+                    "selected_commit_id": getattr(selected_node, "commit_id", None),
+                    "selected_task_id": selected_node_tasks,
+                    "result_values": evals,
+                    "elapsed_seconds": eval_elapsed,
+                    "updated_direct_mean_utility": (
+                        None
+                        if selected_node_stats is None
+                        else selected_node_stats.get("direct_mean_utility")
+                    ),
+                    "updated_direct_eval_count": (
+                        None
+                        if selected_node_stats is None
+                        else selected_node_stats.get("direct_num_evals")
+                    ),
+                    "updated_estimated_cmp": (
+                        None
+                        if selected_node_stats is None
+                        else selected_node_stats.get("estimated_cmp")
+                    ),
+                    "global_n_task_evals": hgm_utils.n_task_evals,
+                },
+            )
 
     had_error = False
     try:
