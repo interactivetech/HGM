@@ -184,17 +184,22 @@ problem_description_prompt = (
 )
 
 
+def build_problem_description_prompt(
+    implementation_suggestion, problem_description, is_polyglot=False
+):
+    summary = coding_agent_summary_polyglot if is_polyglot else coding_agent_summary
+    return summary + problem_description_prompt.format(
+        implementation_suggestion=implementation_suggestion,
+        problem_description=problem_description,
+    )
+
+
 def get_problem_description_prompt(response_json, is_polyglot=False):
-    if is_polyglot:
-        return coding_agent_summary_polyglot + problem_description_prompt.format(
-            implementation_suggestion=response_json["implementation_suggestion"],
-            problem_description=response_json["problem_description"],
-        )
-    else:
-        return coding_agent_summary + problem_description_prompt.format(
-            implementation_suggestion=response_json["implementation_suggestion"],
-            problem_description=response_json["problem_description"],
-        )
+    return build_problem_description_prompt(
+        response_json["implementation_suggestion"],
+        response_json["problem_description"],
+        is_polyglot=is_polyglot,
+    )
 
 
 def read_mdlog_file(filepath, filter=True):

@@ -4,6 +4,7 @@ import argparse
 import json
 import os
 import subprocess
+import sys
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -88,19 +89,20 @@ def preds_to_jsonl(dname, predictions):
 def run_evals(
     predictions_jsonl, run_id, dataset_name, root_dir, output_dir, num_eval_procs=5
 ):
-    # os.chdir(output_dir)  # switch dir so that things will be saved in the specified output_dir
-    run_evals_cmd = f"""
-python {os.path.join(root_dir, './swe_bench/SWE-bench/swebench/harness/run_evaluation.py')}
-    --dataset_name {dataset_name}
-    --predictions_path {predictions_jsonl}
-    --max_workers {num_eval_procs}
-    --run_id {run_id}
-"""
-    run_evals_cmd = " ".join(
-        [line.strip() for line in run_evals_cmd.split() if line.strip()]
-    )
-    subprocess.run(run_evals_cmd.split(), check=True, cwd=output_dir)
-    # os.chdir(root_dir)  # switch back to the original directory
+    run_evals_cmd = [
+        sys.executable,
+        "-m",
+        "swebench.harness.run_evaluation",
+        "--dataset_name",
+        dataset_name,
+        "--predictions_path",
+        predictions_jsonl,
+        "--max_workers",
+        str(num_eval_procs),
+        "--run_id",
+        run_id,
+    ]
+    subprocess.run(run_evals_cmd, check=True, cwd=output_dir)
 
 
 def make_report(
@@ -119,27 +121,14 @@ def make_report(
         run_ids (list): Identifiers for the runs.
         dataset_name (str): Name of the dataset.
     """
-    # Find the root directory by looking for characteristic files/directories
     current_dir = os.path.abspath(os.getcwd())
-
-    # Check if we're already in the hgm_dev directory
-    if os.path.exists(os.path.join(current_dir, "swe_bench")) and os.path.exists(
-        os.path.join(current_dir, "tree_search_outer.py")
-    ):
+    root_dir = current_dir
+    while root_dir != "/":
+        if os.path.exists(os.path.join(root_dir, "swe_bench")):
+            break
+        root_dir = os.path.dirname(root_dir)
+    if root_dir == "/":
         root_dir = current_dir
-    else:
-        # If not, try to find it by going up the directory tree
-        root_dir = current_dir
-        while root_dir != "/":
-            if os.path.exists(os.path.join(root_dir, "swe_bench")) and os.path.exists(
-                os.path.join(root_dir, "tree_search_outer.py")
-            ):
-                break
-            root_dir = os.path.dirname(root_dir)
-
-        if root_dir == "/":
-            # Fallback to current directory if we can't find the expected structure
-            root_dir = current_dir
 
     output_dir = os.path.join(root_dir, output_dir)
 

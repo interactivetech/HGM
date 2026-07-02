@@ -7,6 +7,7 @@ import os
 import random
 import re
 import threading
+import time
 import traceback
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -16,7 +17,6 @@ import docker
 import numpy as np
 
 import self_improve_step
-from polyglot.harness import harness as polyglot_harness
 from prompts.self_improvement_prompt import find_selfimprove_eval_logs
 from prompts.testrepo_prompt import get_test_description
 from self_improve_step import diagnose_problem, save_metadata  # , choose
@@ -25,7 +25,7 @@ from swe_bench.report import make_report
 from utils.common_utils import load_json_file
 from utils.docker_utils import (build_hgm_container, cleanup_container,
                                 copy_from_container, copy_to_container,
-                                log_container_output,
+                                ensure_psql_client, log_container_output,
                                 remove_existing_container, safe_log,
                                 setup_logger)
 from utils.eval_utils import get_acc_on_tasks
@@ -38,6 +38,13 @@ K = 0.5
 bias_factor = 5
 nodes = {}
 total_tasks = []
+CONTAINER_AGENT_PYTHON_CANDIDATES = (
+    "/opt/miniconda3/envs/testbed/bin/python",
+    "/usr/local/bin/python",
+    "/usr/bin/python3",
+    "python3",
+    "python",
+)
 output_dir = ""
 polyglot = False
 n_task_evals = 0
@@ -46,6 +53,23 @@ llm = ""
 timeout = 3600
 
 pending_tasks_lock = threading.Lock()
+
+
+def resolve_container_agent_python(container):
+    for candidate in CONTAINER_AGENT_PYTHON_CANDIDATES:
+        exec_result = container.exec_run(
+            f"/bin/sh -lc 'command -v {candidate}'",
+            workdir="/",
+        )
+        if exec_result.exit_code == 0:
+            python_path = exec_result.output.decode("utf-8", errors="replace").strip()
+            if python_path:
+                safe_log(f"Using container agent python: {python_path}")
+                return python_path
+    raise RuntimeError(
+        "No Python executable found in container. Tried: "
+        + ", ".join(CONTAINER_AGENT_PYTHON_CANDIDATES)
+    )
 
 
 def init(_polyglot, _output_dir, _tasks, _n_task_evals=0, _llm="", _timeout=3600):
@@ -235,6 +259,8 @@ def eval_agent(
         os.path.join(root_dir, output_dir, commit_id, "metadata.json")
     )
     if polyglot:
+        from polyglot.harness import harness as polyglot_harness
+
         polyglot_harness(
             test_task_list=tasks,
             max_workers=min(max_workers, len(tasks)),
@@ -278,15 +304,29 @@ def eval_agent(
 
 def sample_child(parent_commit, image_name, force_rebuild=False, max_try=1):
     metadata = {}
+    container = None
     root_dir = os.path.abspath("./")  # root_dir should be /hgm
     run_id = datetime.datetime.now().strftime("%Y%m%d_%H%M%S_%f")
     out_dir_base = output_dir  # out_dir_base should be /hgm/output_selfimprove/ or /hgm/output_hgm/{hgm_run_id}/
     run_output_dir = os.path.join(root_dir, f"{output_dir}/{run_id}/")
     os.makedirs(run_output_dir, exist_ok=True)
+    setup_logger(os.path.join(run_output_dir, "self_improve.log"))
+    sample_child_started_at = time.time()
 
     try:
         if parent_commit == "failed":
             return "failed"
+        safe_log(
+            "sample_child started "
+            f"run_id={run_id} parent_commit={parent_commit} "
+            f"force_rebuild={force_rebuild} max_try={max_try}"
+        )
+        metadata["status"] = "started"
+        metadata["timestamps"] = {"started_at_epoch": time.time()}
+        metadata["llm_env"] = {
+            "VLLM_BASE_URL": os.getenv("VLLM_BASE_URL"),
+            "VLLM_MODEL": os.getenv("VLLM_MODEL"),
+        }
         if polyglot:
             with open("polyglot/polyglot_benchmark_metadata.json") as f:
                 dataset = json.loads(f.read())
@@ -297,7 +337,6 @@ def sample_child(parent_commit, image_name, force_rebuild=False, max_try=1):
             dataset = dataset["test"]
         self_improve_step.dataset = dataset
 
-        setup_logger(os.path.join(run_output_dir, "self_improve.log"))
         metadata["run_id"] = run_id
         metadata["parent_commit"] = parent_commit
 
@@ -312,6 +351,8 @@ def sample_child(parent_commit, image_name, force_rebuild=False, max_try=1):
             force_rebuild=force_rebuild,
         )
         container.start()
+        container_agent_python = resolve_container_agent_python(container)
+        ensure_psql_client(container)
         if polyglot:
             exec_result = container.exec_run("rm /hgm/coding_agent.py", workdir="/")
             log_container_output(exec_result)
@@ -355,7 +396,10 @@ def sample_child(parent_commit, image_name, force_rebuild=False, max_try=1):
         )  # Get the latest commit hash
 
         exec_result = container.exec_run(
-            "python -m pip install -r /hgm/requirements.txt", workdir="/"
+            "/bin/bash -lc 'if [ -f /hgm/requirements_agent_runtime.txt ]; then "
+            f"{container_agent_python} -m pip install -r /hgm/requirements_agent_runtime.txt; "
+            f"else {container_agent_python} -m pip install -r /hgm/requirements.txt; fi'",
+            workdir="/",
         )
         log_container_output(exec_result)
 
@@ -369,6 +413,11 @@ def sample_child(parent_commit, image_name, force_rebuild=False, max_try=1):
         except Exception as e:
             choose_entry(parent_commit, debug=True)
             raise e
+        diagnose_started_at = time.time()
+        safe_log(
+            "Starting diagnose_problem "
+            f"run_id={run_id} entry={entry} parent_commit={parent_commit}"
+        )
         problem_statement = diagnose_problem(
             entry,
             parent_commit,
@@ -376,6 +425,12 @@ def sample_child(parent_commit, image_name, force_rebuild=False, max_try=1):
             out_dir_base,
             patch_files=patch_files,
             polyglot=polyglot,
+        )
+        safe_log(
+            "Finished diagnose_problem "
+            f"run_id={run_id} entry={entry} "
+            f"elapsed={time.time() - diagnose_started_at:.2f}s "
+            f"problem_statement_present={bool(problem_statement)}"
         )
         safe_log(f"problem_statement: {problem_statement}")
 
@@ -386,11 +441,15 @@ def sample_child(parent_commit, image_name, force_rebuild=False, max_try=1):
             cleanup_container(container)
             save_metadata(metadata, run_output_dir)
             if max_try > 1:
-                return sample_child(parent_commit, force_rebuild, max_try - 1)
+                return sample_child(parent_commit, image_name, force_rebuild, max_try - 1)
             else:
                 return "failed"
 
-        safe_log("Running self-improvement")
+        self_improve_started_at = time.time()
+        safe_log(
+            "Starting self-improvement "
+            f"run_id={run_id} entry={entry} parent_commit={parent_commit}"
+        )
         chat_history_file_container = "/hgm/self_evo.md"
         test_description = get_test_description(swerepo=False)
         env_vars = {
@@ -401,11 +460,20 @@ def sample_child(parent_commit, image_name, force_rebuild=False, max_try=1):
             "AWS_SECRET_ACCESS_KEY": os.getenv("AWS_SECRET_ACCESS_KEY"),
             "OPENAI_API_KEY": os.getenv("OPENAI_API_KEY"),
             "OpenRouter_API_KEY": os.getenv("OpenRouter_API_KEY"),
+            "VLLM_BASE_URL": os.getenv("VLLM_BASE_URL"),
+            "VLLM_API_KEY": os.getenv("VLLM_API_KEY"),
+            "VLLM_MODEL": os.getenv("VLLM_MODEL"),
         }
+        safe_log(
+            "Running self-improvement with provider env "
+            f"VLLM_BASE_URL={env_vars.get('VLLM_BASE_URL')} "
+            f"VLLM_MODEL={env_vars.get('VLLM_MODEL')}"
+        )
         cmd = [
             "timeout",
             str(timeout),
-            "python",
+            container_agent_python,
+            "-u",
             "/hgm/coding_agent.py",
             "--problem_statement",
             problem_statement,
@@ -425,13 +493,21 @@ def sample_child(parent_commit, image_name, force_rebuild=False, max_try=1):
             "--timeout",
             str(timeout),
         ]
-        exec_result = container.exec_run(cmd, environment=env_vars, workdir="/")
+        exec_result = container.exec_run(
+            cmd, environment=env_vars, workdir="/", stream=True
+        )
         log_container_output(exec_result, raise_error=False)
 
         chat_history_file = os.path.join(output_dir, run_id, "self_evo.md")
         copy_from_container(container, chat_history_file_container, chat_history_file)
         model_patch_file = os.path.join(output_dir, run_id, "model_patch.diff")
         copy_from_container(container, "/hgm/model_patch.diff", model_patch_file)
+        safe_log(
+            "Finished self-improvement "
+            f"run_id={run_id} entry={entry} "
+            f"elapsed={time.time() - self_improve_started_at:.2f}s "
+            f"model_patch_file={model_patch_file}"
+        )
 
         metadata["overall_performance"] = {
             "accuracy_score": 0.0,
@@ -449,19 +525,30 @@ def sample_child(parent_commit, image_name, force_rebuild=False, max_try=1):
             patch_content = f.read()
             if not patch_content.strip():
                 raise Exception("Model patch file is empty")
+        metadata["status"] = "success"
 
     except Exception as e:
+        metadata["status"] = "failed"
+        metadata["error_message"] = str(e)
+        metadata["error_traceback"] = traceback.format_exc()
         if max_try > 1:
             safe_log(f"Error while sampling a child: {str(e)}. Retrying...")
             safe_log(traceback.format_exc())
-            return sample_child(parent_commit, force_rebuild, max_try - 1)
+            return sample_child(parent_commit, image_name, force_rebuild, max_try - 1)
         else:
             safe_log(f"Error while sampling a child: {str(e)}")
             safe_log(traceback.format_exc())
             return "failed"
     finally:
+        metadata.setdefault("timestamps", {})["finished_at_epoch"] = time.time()
+        safe_log(
+            "sample_child finished "
+            f"run_id={run_id} status={metadata.get('status')} "
+            f"elapsed={time.time() - sample_child_started_at:.2f}s"
+        )
         try:
-            cleanup_container(container)
+            if container is not None:
+                cleanup_container(container)
         except Exception as e:
             safe_log(f"Error during container cleanup: {e}")
         save_metadata(metadata, run_output_dir)

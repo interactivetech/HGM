@@ -15,6 +15,9 @@ class LLMConfig:
     self_improve_llm: str = "gpt-5-mini"
     downstream_llm: str = "gpt-5-mini"
     diagnose_llm: str = "gpt-5-mini"
+    vllm_base_url: Optional[str] = None
+    vllm_api_key: Optional[str] = None
+    vllm_model: Optional[str] = None
 
 
 @dataclass
@@ -34,6 +37,7 @@ class ExecutionConfig:
     self_improve_timeout: int = 3600
     evaluation_timeout: int = 3600
     max_task_evals: int = 800
+    initial_eval_tasks: Optional[int] = None
 
 
 @dataclass
@@ -154,6 +158,9 @@ class HGMConfig:
                 'self_improve_llm': self.llm.self_improve_llm,
                 'downstream_llm': self.llm.downstream_llm,
                 'diagnose_llm': self.llm.diagnose_llm,
+                'vllm_base_url': self.llm.vllm_base_url,
+                'vllm_api_key': self.llm.vllm_api_key,
+                'vllm_model': self.llm.vllm_model,
             },
             'optimization': {
                 'alpha': self.optimization.alpha,
@@ -167,6 +174,7 @@ class HGMConfig:
                 'self_improve_timeout': self.execution.self_improve_timeout,
                 'evaluation_timeout': self.execution.evaluation_timeout,
                 'max_task_evals': self.execution.max_task_evals,
+                'initial_eval_tasks': self.execution.initial_eval_tasks,
             },
             'evaluation': {
                 'full_eval': self.evaluation.full_eval,

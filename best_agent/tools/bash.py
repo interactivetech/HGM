@@ -149,7 +149,15 @@ async def tool_function_call(command):
         return f"Error: {str(e)}"
 
 def tool_function(command):
-    return asyncio.run(tool_function_call(command))
+    loop = asyncio.new_event_loop()
+    try:
+        asyncio.set_event_loop(loop)
+        return loop.run_until_complete(tool_function_call(command))
+    finally:
+        try:
+            loop.close()
+        finally:
+            asyncio.set_event_loop(None)
 
 if __name__ == "__main__":
     # Example usage

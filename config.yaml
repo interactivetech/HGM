@@ -11,6 +11,11 @@ llm:
   # Model used for problem diagnosis
   diagnose_llm: "gpt-5-mini"
 
+  # Optional OpenAI-compatible vLLM endpoint configuration
+  vllm_base_url: null
+  vllm_api_key: null
+  vllm_model: null
+
 # Optimization Algorithm Parameters
 optimization:
   # Alpha parameter for node expansion (controls exploration vs exploitation)
@@ -41,6 +46,10 @@ execution:
   
   # Maximum number of task evaluations (evolution iterations)
   max_task_evals: 800
+
+  # Optional cap on the initial cached baseline evaluation workload.
+  # Set to null to evaluate the full SWE subset.
+  initial_eval_tasks: null
 
 # Evaluation Settings
 evaluation:

@@ -90,6 +90,15 @@ def process_entry(
             os.path.join(init_agent_path, "requirements.txt"),
             "/hgm/requirements.txt",
         )
+        runtime_requirements = os.path.join(
+            init_agent_path, "requirements_agent_runtime.txt"
+        )
+        if os.path.exists(runtime_requirements):
+            copy_to_container(
+                container,
+                runtime_requirements,
+                "/hgm/requirements_agent_runtime.txt",
+            )
         copy_to_container(
             container, os.path.join(init_agent_path, "pytest.ini"), "/hgm/pytest.ini"
         )
@@ -146,7 +155,10 @@ def process_entry(
         # Install this repo requirements
         safe_log("Installing more requirements")
         exec_result = container.exec_run(
-            "python -m pip install -r /hgm/requirements.txt", workdir="/"
+            "/bin/bash -lc 'if [ -f /hgm/requirements_agent_runtime.txt ]; then "
+            "python -m pip install -r /hgm/requirements_agent_runtime.txt; "
+            "else python -m pip install -r /hgm/requirements.txt; fi'",
+            workdir="/",
         )
         log_container_output(exec_result)
 
@@ -159,7 +171,15 @@ def process_entry(
             "AWS_SECRET_ACCESS_KEY": os.getenv("AWS_SECRET_ACCESS_KEY"),
             "OPENAI_API_KEY": os.getenv("OPENAI_API_KEY"),
             "OpenRouter_API_KEY": os.getenv("OpenRouter_API_KEY"),
+            "VLLM_BASE_URL": os.getenv("VLLM_BASE_URL"),
+            "VLLM_API_KEY": os.getenv("VLLM_API_KEY"),
+            "VLLM_MODEL": os.getenv("VLLM_MODEL"),
         }
+        logger.info(
+            "Provider env for child agent: "
+            f"VLLM_BASE_URL={env_vars.get('VLLM_BASE_URL')} "
+            f"VLLM_MODEL={env_vars.get('VLLM_MODEL')}"
+        )
         safe_log("Running the agent")
         cmd = [
             "timeout",

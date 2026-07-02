@@ -11,16 +11,21 @@ import docker
 from datasets import load_dataset
 from swebench.harness.docker_build import (build_container, build_env_images,
                                            cleanup_container)
-from swebench.harness.test_spec import make_test_spec
+try:
+    from swebench.harness.test_spec import make_test_spec
+except ImportError:
+    from swebench.harness.test_spec.test_spec import make_test_spec
 
 from prompts.testrepo_prompt import get_test_description
 from swe_bench.utils import (copy_from_container, copy_to_container,
-                             log_container_output, remove_existing_container,
-                             safe_log, setup_logger)
+                             ensure_psql_client, log_container_output,
+                             remove_existing_container, safe_log,
+                             setup_logger)
 from utils.common_utils import load_json_file
 
 llm = ""  # Global variable to hold the LLM model name or path
 timeout = 1800
+CONTAINER_AGENT_PYTHON = "/opt/miniconda3/envs/testbed/bin/python"
 
 
 def process_entry(
@@ -61,6 +66,7 @@ def process_entry(
             test_spec, client, run_id, logger, nocache, force_rebuild=False
         )
         container.start()
+        ensure_psql_client(container)
 
         # Check that we are in hgm directory
         tmp_currdir = os.path.abspath(os.getcwd())
@@ -94,6 +100,15 @@ def process_entry(
             os.path.join(init_agent_path, "requirements.txt"),
             "/hgm/requirements.txt",
         )
+        runtime_requirements = os.path.join(
+            init_agent_path, "requirements_agent_runtime.txt"
+        )
+        if os.path.exists(runtime_requirements):
+            copy_to_container(
+                container,
+                runtime_requirements,
+                "/hgm/requirements_agent_runtime.txt",
+            )
         copy_to_container(
             container, os.path.join(init_agent_path, "pytest.ini"), "/hgm/pytest.ini"
         )
@@ -159,7 +174,10 @@ def process_entry(
         # Install this repo requirements
         safe_log("Installing more requirements")
         exec_result = container.exec_run(
-            "python -m pip install -r /hgm/requirements.txt", workdir="/"
+            "/bin/bash -lc 'if [ -f /hgm/requirements_agent_runtime.txt ]; then "
+            f"{CONTAINER_AGENT_PYTHON} -m pip install -r /hgm/requirements_agent_runtime.txt; "
+            f"else {CONTAINER_AGENT_PYTHON} -m pip install -r /hgm/requirements.txt; fi'",
+            workdir="/",
         )
         log_container_output(exec_result)
 
@@ -172,12 +190,21 @@ def process_entry(
             "AWS_SECRET_ACCESS_KEY": os.getenv("AWS_SECRET_ACCESS_KEY"),
             "OPENAI_API_KEY": os.getenv("OPENAI_API_KEY"),
             "OpenRouter_API_KEY": os.getenv("OpenRouter_API_KEY"),
+            "VLLM_BASE_URL": os.getenv("VLLM_BASE_URL"),
+            "VLLM_API_KEY": os.getenv("VLLM_API_KEY"),
+            "VLLM_MODEL": os.getenv("VLLM_MODEL"),
         }
+        logger.info(
+            "Provider env for child agent: "
+            f"VLLM_BASE_URL={env_vars.get('VLLM_BASE_URL')} "
+            f"VLLM_MODEL={env_vars.get('VLLM_MODEL')}"
+        )
         safe_log("Running the agent")
         cmd = [
             "timeout",
             str(timeout),  # 30min timeout
-            "python",
+            CONTAINER_AGENT_PYTHON,
+            "-u",
             "/hgm/coding_agent.py",
             "--problem_statement",
             problem_statement,
@@ -198,7 +225,9 @@ def process_entry(
             "--timeout",
             str(timeout),
         ]
-        exec_result = container.exec_run(cmd, environment=env_vars, workdir="/")
+        exec_result = container.exec_run(
+            cmd, environment=env_vars, workdir="/", stream=True
+        )
         log_container_output(exec_result)
 
         # Copy output files back to host
@@ -287,7 +316,7 @@ def harness(
         num_evals: Repeated number of swe evaluations
     """
     # Load dataset
-    dataset = load_dataset("princeton-nlp/SWE-bench")
+    dataset = load_dataset("princeton-nlp/SWE-bench_Verified")
     dataset = dataset["test"]
 
     # Ensure that necessary directories exist
@@ -304,7 +333,12 @@ def harness(
     # Build the environment images
     client = docker.from_env()
     build_env_images(
-        client, dataset=entries, force_rebuild=False, max_workers=max_workers
+        client,
+        dataset=entries,
+        force_rebuild=False,
+        max_workers=max_workers,
+        instance_image_tag="latest",
+        env_image_tag="latest",
     )
     # Get all subdirectories under pred_dname
     subdirs = [d for d in pred_dname.iterdir() if d.is_dir()]

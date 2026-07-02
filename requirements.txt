@@ -17,6 +17,7 @@ pre-commit
 python-dotenv
 rich
 unidiff
+matplotlib
 
 # pytest
 pytest

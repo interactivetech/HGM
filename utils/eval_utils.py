@@ -114,6 +114,7 @@ Your response will be automatically parsed, so ensure that the string response i
             system_message="You are an excellent software engineer who has been asked to evaluate the proposed solutions to a problem statement.",
             print_debug=True,
             msg_history=None,
+            logging=logging,
         )
         logging(repr(response))
         response_json = extract_json_between_markers(response)

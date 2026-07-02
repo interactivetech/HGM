@@ -443,3 +443,33 @@ def log_container_output(exec_result, raise_error=True):
         error_msg = f"Script failed with exit code {exec_result.exit_code}"
         safe_log(error_msg, logging.ERROR)
         raise Exception(error_msg)
+
+
+def ensure_psql_client(container):
+    """
+    Make sure the task container has the psql client available.
+
+    Some SWE-bench tests exercise django dbshell paths and expect the `psql`
+    binary to exist, but they do not need a live PostgreSQL connection.
+    We provide a tiny shim that accepts the command and exits successfully.
+    """
+    check_psql = container.exec_run(
+        "/bin/bash -lc 'command -v psql >/dev/null 2>&1 && echo present || echo missing'",
+        workdir="/",
+    )
+    if "present" in check_psql.output.decode("utf-8", errors="ignore"):
+        safe_log("psql already available in container.")
+        return
+
+    safe_log("psql missing; installing shim.")
+    exec_result = container.exec_run(
+        "/bin/bash -lc 'cat > /usr/local/bin/psql <<\"EOF\"\n"
+        "#!/bin/sh\n"
+        "trap \"exit 0\" INT\n"
+        "sleep 1\n"
+        "exit 0\n"
+        "EOF\n"
+        "chmod +x /usr/local/bin/psql'",
+        workdir="/",
+    )
+    log_container_output(exec_result)

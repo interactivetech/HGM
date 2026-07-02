@@ -7,6 +7,7 @@ import math
 import os
 import random
 import string
+import sys
 import threading
 import time
 import traceback
@@ -25,6 +26,18 @@ from tree import Node
 from utils.common_utils import load_json_file
 from utils.docker_utils import copy_src_files, setup_logger
 from utils.evo_utils import load_hgm_metadata
+
+
+def apply_vllm_env_overrides(llm_cfg):
+    env_updates = {
+        "VLLM_BASE_URL": llm_cfg.vllm_base_url,
+        "VLLM_API_KEY": llm_cfg.vllm_api_key,
+        "VLLM_MODEL": llm_cfg.vllm_model,
+    }
+    for key, value in env_updates.items():
+        if value:
+            os.environ[key] = value
+    return {key: os.getenv(key) for key in env_updates}
 
 
 def update_metadata(output_dir, n_task_evals):
@@ -54,6 +67,7 @@ def initialize_run(
     self_improve_llm,
     tasks,
     initial_agent_name,
+    initial_eval_tasks=None,
     prevrun_dir=None,
     polyglot=False,
     timeout=3600,
@@ -67,12 +81,16 @@ def initialize_run(
         if not os.path.exists(f"{initial_folder}/{initial_agent_name}"):
             copy_src_files(f"{initial_folder}/{initial_agent_name}/src", build_image=True)
             hgm_utils.output_dir = initial_folder
+            initial_eval_task_list = tasks
+            if initial_eval_tasks is not None:
+                initial_eval_task_list = initial_eval_task_list[:initial_eval_tasks]
             hgm_utils.eval_agent(
                 initial_agent_name,
-                tasks = hgm_utils.total_tasks,
+                tasks=initial_eval_task_list,
                 max_workers=max_workers,
                 init_agent_path=f"{initial_folder}/{initial_agent_name}/src",
             )
+            hgm_utils.init_evaluated_tasks = list(initial_eval_task_list)
             hgm_utils.output_dir = output_dir
 
     os.system(f"cp -r {initial_folder}/{initial_agent_name} {output_dir}/initial")
@@ -134,6 +152,12 @@ def main():
         help="Maximum number of evolution iterations.",
     )
     parser.add_argument(
+        "--initial_eval_tasks",
+        type=int,
+        default=None,
+        help="Cap the initial baseline evaluation to the first N tasks.",
+    )
+    parser.add_argument(
         "--max_workers",
         type=int,
         default=None,
@@ -180,6 +204,24 @@ def main():
         type=str,
         default=None,
         help="LLM model to use for diagnosis",
+    )
+    parser.add_argument(
+        "--vllm_base_url",
+        type=str,
+        default=None,
+        help="Base URL for a local OpenAI-compatible vLLM endpoint.",
+    )
+    parser.add_argument(
+        "--vllm_api_key",
+        type=str,
+        default=None,
+        help="API key for a local OpenAI-compatible vLLM endpoint.",
+    )
+    parser.add_argument(
+        "--vllm_model",
+        type=str,
+        default=None,
+        help="Default model ID served by the local vLLM endpoint.",
     )
     parser.add_argument(
         "--alpha", type=float, default=None, help="Alpha parameter for node expansion."
@@ -244,6 +286,8 @@ def main():
     overrides = {}
     if args.max_task_evals is not None:
         overrides["execution.max_task_evals"] = args.max_task_evals
+    if args.initial_eval_tasks is not None:
+        overrides["execution.initial_eval_tasks"] = args.initial_eval_tasks
     if args.max_workers is not None:
         overrides["execution.max_workers"] = args.max_workers
     if args.continue_from is not None:
@@ -256,6 +300,12 @@ def main():
         overrides["llm.downstream_llm"] = args.downstream_llm
     if args.diagnose_llm is not None:
         overrides["llm.diagnose_llm"] = args.diagnose_llm
+    if args.vllm_base_url is not None:
+        overrides["llm.vllm_base_url"] = args.vllm_base_url
+    if args.vllm_api_key is not None:
+        overrides["llm.vllm_api_key"] = args.vllm_api_key
+    if args.vllm_model is not None:
+        overrides["llm.vllm_model"] = args.vllm_model
     if args.alpha is not None:
         overrides["optimization.alpha"] = args.alpha
     if args.cool_down is not None:
@@ -289,6 +339,7 @@ def main():
     exec_cfg = config.execution
     eval_cfg = config.evaluation
     path_cfg = config.paths
+    vllm_env = apply_vllm_env_overrides(llm_cfg)
 
     # Variables for this HGM run
     if path_cfg.output_dir:
@@ -307,17 +358,42 @@ def main():
     print(f"Using config file: {args.config}")
     print(f"Output directory: {output_dir}")
     print(f"Output directory exists: {os.path.exists(output_dir)}")
+    print(
+        "vLLM env: "
+        f"base_url={vllm_env.get('VLLM_BASE_URL')} "
+        f"model={vllm_env.get('VLLM_MODEL')}"
+    )
 
-    import polyglot.harness
+    run_started_at = time.time()
+    config_snapshot = config.to_dict()
+    if config_snapshot["llm"].get("vllm_api_key"):
+        config_snapshot["llm"]["vllm_api_key"] = "***"
+    with open(os.path.join(output_dir, "run_config.json"), "w") as f:
+        json.dump(
+            {
+                "config": config_snapshot,
+                "env": {
+                    "VLLM_BASE_URL": vllm_env.get("VLLM_BASE_URL"),
+                    "VLLM_MODEL": vllm_env.get("VLLM_MODEL"),
+                    "OPENAI_API_KEY_set": bool(os.getenv("OPENAI_API_KEY")),
+                },
+                "run_started_at_epoch": run_started_at,
+            },
+            f,
+            indent=2,
+        )
+
     import self_improve_step
-
-    polyglot.harness.llm = llm_cfg.downstream_llm  # Set the LLM model for downstream tasks
     import swe_bench.harness
 
+    if eval_cfg.polyglot:
+        import polyglot.harness
+
+        polyglot.harness.llm = llm_cfg.downstream_llm
+        polyglot.harness.timeout = exec_cfg.evaluation_timeout
     swe_bench.harness.llm = (
         llm_cfg.downstream_llm
     )  # Set the LLM model for downstream tasks
-    polyglot.harness.timeout = exec_cfg.evaluation_timeout
     swe_bench.harness.timeout = exec_cfg.evaluation_timeout
     self_improve_step.diagnose_llm = llm_cfg.diagnose_llm
     self_improve_step.self_improve_llm = llm_cfg.self_improve_llm
@@ -345,6 +421,7 @@ def main():
         llm_cfg.self_improve_llm,
         tasks,
         path_cfg.initial_agent_name,
+        initial_eval_tasks=exec_cfg.initial_eval_tasks,
         prevrun_dir=path_cfg.continue_from,
         polyglot=eval_cfg.polyglot,
         timeout=exec_cfg.self_improve_timeout,
@@ -356,8 +433,15 @@ def main():
     logger.info(
         f"Starting HGM run {run_id} with configuration: {config.to_dict()}"
     )
+    logger.info(
+        "Local provider configuration: "
+        f"VLLM_BASE_URL={vllm_env.get('VLLM_BASE_URL')} "
+        f"VLLM_MODEL={vllm_env.get('VLLM_MODEL')}"
+    )
 
     def TS_sample(evals):
+        if len(evals) == 0:
+            raise ValueError("TS_sample received an empty evaluation list")
         alphas = [1 + np.sum(de) for de in evals]
         betas = [1 + len(de) - np.sum(de) for de in evals]
         if opt_cfg.cool_down:
@@ -387,6 +471,8 @@ def main():
                 for node in hgm_utils.nodes.values()
                 if np.isfinite(node.mean_utility) and node.mean_utility > 0
             ]
+            if len(nodes) == 0:
+                nodes = [hgm_utils.nodes[0]]
             decendant_evals = [
                 node.get_decendant_evals(num_pseudo=opt_cfg.n_pseudo_descendant_evals)
                 for node in nodes
@@ -459,6 +545,7 @@ def main():
             n_pending_measures -= 1
             update_metadata(output_dir, hgm_utils.n_task_evals)
 
+    had_error = False
     try:
         with ThreadPoolExecutor(max_workers=exec_cfg.max_workers) as executor:
             futures = [
@@ -480,9 +567,42 @@ def main():
                 future.result()
 
     except Exception as e:
+        had_error = True
         logger.error(f"Error: {e}")
         logger.error(traceback.format_exc())
         print(repr(e))
+    finally:
+        run_finished_at = time.time()
+        try:
+            non_initial_nodes = [
+                node.save_as_dict()
+                for node in hgm_utils.nodes.values()
+                if getattr(node, "commit_id", None) != "initial"
+            ]
+            with open(os.path.join(output_dir, "run_summary.json"), "w") as f:
+                json.dump(
+                    {
+                        "run_id": run_id,
+                        "wall_clock_seconds": run_finished_at - run_started_at,
+                        "run_started_at_epoch": run_started_at,
+                        "run_finished_at_epoch": run_finished_at,
+                        "max_task_evals": exec_cfg.max_task_evals,
+                        "max_workers": exec_cfg.max_workers,
+                        "polyglot": eval_cfg.polyglot,
+                        "full_eval": eval_cfg.full_eval,
+                        "n_task_evals": hgm_utils.n_task_evals,
+                        "num_non_initial_nodes": len(non_initial_nodes),
+                        "vllm_base_url": vllm_env.get("VLLM_BASE_URL"),
+                        "vllm_model": vllm_env.get("VLLM_MODEL"),
+                    },
+                    f,
+                    indent=2,
+                )
+        except Exception:
+            logger.error("Failed to write run_summary.json")
+            logger.error(traceback.format_exc())
+    if had_error:
+        sys.exit(1)
 
 
 if __name__ == "__main__":

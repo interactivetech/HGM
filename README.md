@@ -54,6 +54,34 @@ python -m polyglot.prepare_polyglot_dataset
 ./run.sh
 ```
 
+## Local OpenAI-compatible vLLM / Qwen
+
+Local vLLM endpoint support, smoke tests, staged budget sweeps, and SWE-Lite generalization evaluation are documented in [docs/local_vllm_qwen.md](docs/local_vllm_qwen.md).
+
+Set these environment variables in the shell before running local Qwen experiments:
+
+```bash
+export VLLM_BASE_URL="http://173.73.39.103:8000/v1"
+export VLLM_API_KEY="dummy"
+export VLLM_MODEL="Qwen/Qwen3.6-35B-A3B-FP8"
+
+# Optional compatibility fallback. Local vLLM mode does not require paid OpenAI calls.
+export OPENAI_API_KEY="${OPENAI_API_KEY:-dummy}"
+```
+
+Useful commands for fresh Qwen experiment runs:
+
+```bash
+# Reset local experiment artifacts
+bash scripts/reset_qwen_experiment_state.sh
+
+# Reset artifacts and the cached bootstrap Docker image
+bash scripts/reset_qwen_experiment_state.sh --docker
+
+# Run the staged budget sweep and save a live log
+PYTHONUNBUFFERED=1 bash scripts/run_qwen_budget_sweep.sh 2>&1 | tee qwen_budget_sweep_$(date +%Y%m%d_%H%M%S).log
+```
+
 ## Safety Consideration
 > [!WARNING]  
 > This repository involves executing untrusted, model-generated code. We strongly advise users to be aware of the associated safety risks. While it is highly unlikely that such code will perform overtly malicious actions under our current settings and with the models we use, it may still behave destructively due to limitations in model capability or alignment. By using this repository, you acknowledge and accept these risks.

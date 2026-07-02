@@ -94,7 +94,11 @@ def reset_to_commit(git_dname, commit):
     # Step 1: Hard-reset tracked files
     reset_cmd = ["git", "-C", git_dname, "reset", "--hard", commit]
     result_reset = subprocess.run(
-        reset_cmd, capture_output=True, text=True, check=False
+        reset_cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        universal_newlines=True,
+        check=False,
     )
     if result_reset.returncode != 0:
         print(
@@ -106,7 +110,11 @@ def reset_to_commit(git_dname, commit):
     # Step 2: Clean untracked files (the "new files") and directories
     clean_cmd = ["git", "-C", git_dname, "clean", "-fd"]
     result_clean = subprocess.run(
-        clean_cmd, capture_output=True, text=True, check=False
+        clean_cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        universal_newlines=True,
+        check=False,
     )
     if result_clean.returncode != 0:
         print(

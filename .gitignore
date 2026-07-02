@@ -2,7 +2,9 @@ __pycache__/
 .vscode
 .DS_Store
 venv/
-
+.venv/
+*.log
+output_*/
 logs/
 swe_bench/predictions/
 swe_bench/tmp_repos/

@@ -9,7 +9,7 @@ import json
 import platform
 import re
 from dataclasses import dataclass
-from typing import Any, Union, cast
+from typing import Any, Dict, List, Union, cast
 
 from swebench.harness.utils import get_environment_yml, get_requirements
 
@@ -29,9 +29,9 @@ class TestSpec:
 
     instance_id: str
     repo: str
-    repo_script_list: list[str]
-    eval_script_list: list[str]
-    env_script_list: list[str]
+    repo_script_list: List[str]
+    eval_script_list: List[str]
+    env_script_list: List[str]
     arch: str
 
     @property
@@ -106,14 +106,14 @@ class TestSpec:
 
 
 def get_test_specs_from_dataset(
-    dataset: Union[list[dict], list[TestSpec]]
-) -> list[TestSpec]:
+    dataset: Union[List[Dict], List[TestSpec]]
+) -> List[TestSpec]:
     """
     Idempotent function that converts a list of SWEbenchInstance objects to a list of TestSpec objects.
     """
     if isinstance(dataset[0], TestSpec):
-        return cast(list[TestSpec], dataset)
-    return list(map(make_test_spec, cast(list[dict], dataset)))
+        return cast(List[TestSpec], dataset)
+    return list(map(make_test_spec, cast(List[Dict], dataset)))
 
 
 def make_repo_script_list(specs, repo, repo_directory, base_commit, env_name):
@@ -168,13 +168,13 @@ def replace_uninstallable_packages_requirements_txt(requirement_str: str) -> str
     return "\n".join(requirements_replaced) + "\n"
 
 
-def make_env_script_list(instance: dict, specs: dict, env_name: str) -> list[str]:
+def make_env_script_list(instance: dict, specs: dict, env_name: str) -> List[str]:
     """
     Creates the list of commands to set up the conda environment for testing.
     This is the setup script for the environment image.
 
     Returns:
-        list[str]: List of commands to set up the conda environment
+        List[str]: List of commands to set up the conda environment
     """
     HEREDOC_DELIMITER = "EOF_59812759871"
     reqs_commands = [

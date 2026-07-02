@@ -4,6 +4,9 @@ __pycache__/
 *.pyo
 .vscode
 .env
+.venv
+.venv/
+**/.venv/
 .ipynb
 .git
 .gitignore

@@ -115,8 +115,9 @@ def view_path(path_obj: Path) -> str:
         try:
             result = subprocess.run(
                 ["find", str(path_obj), "-maxdepth", "2", "-not", "-path", "*/\\.*"],
-                capture_output=True,
-                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                universal_newlines=True,
             )
             if result.stderr:
                 return f"Error listing directory: {result.stderr}"

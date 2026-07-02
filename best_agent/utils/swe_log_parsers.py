@@ -1,6 +1,7 @@
 # This file is adapted from https://github.com/jennyzzt/dgm.
 import re
 from enum import Enum
+from typing import Dict
 
 class TestStatus(Enum):
     FAILED = "FAILED"
@@ -9,7 +10,7 @@ class TestStatus(Enum):
     ERROR = "ERROR"
     XFAIL = "XFAIL"
 
-def parse_log_pytest(log: str) -> dict[str, str]:
+def parse_log_pytest(log: str) -> Dict[str, str]:
     """
     Parser for test logs generated with PyTest framework
 
@@ -31,7 +32,7 @@ def parse_log_pytest(log: str) -> dict[str, str]:
     return test_status_map
 
 
-def parse_log_pytest_options(log: str) -> dict[str, str]:
+def parse_log_pytest_options(log: str) -> Dict[str, str]:
     """
     Parser for test logs generated with PyTest framework with options
 
@@ -62,7 +63,7 @@ def parse_log_pytest_options(log: str) -> dict[str, str]:
     return test_status_map
 
 
-def parse_log_django(log: str) -> dict[str, str]:
+def parse_log_django(log: str) -> Dict[str, str]:
     """
     Parser for test logs generated with Django tester framework
 
@@ -138,7 +139,7 @@ def parse_log_django(log: str) -> dict[str, str]:
     return test_status_map
 
 
-def parse_log_pytest_v2(log: str) -> dict[str, str]:
+def parse_log_pytest_v2(log: str) -> Dict[str, str]:
     """
     Parser for test logs generated with PyTest framework (Later Version)
 
@@ -165,7 +166,7 @@ def parse_log_pytest_v2(log: str) -> dict[str, str]:
     return test_status_map
 
 
-def parse_log_seaborn(log: str) -> dict[str, str]:
+def parse_log_seaborn(log: str) -> Dict[str, str]:
     """
     Parser for test logs generated with seaborn testing framework
 
@@ -191,7 +192,7 @@ def parse_log_seaborn(log: str) -> dict[str, str]:
     return test_status_map
 
 
-def parse_log_sympy(log: str) -> dict[str, str]:
+def parse_log_sympy(log: str) -> Dict[str, str]:
     """
     Parser for test logs generated with Sympy framework
 
@@ -224,7 +225,7 @@ def parse_log_sympy(log: str) -> dict[str, str]:
     return test_status_map
 
 
-def parse_log_matplotlib(log: str) -> dict[str, str]:
+def parse_log_matplotlib(log: str) -> Dict[str, str]:
     """
     Parser for test logs generated with PyTest framework
 

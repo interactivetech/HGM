@@ -3,6 +3,7 @@ import hgm_utils
 import os
 import swe_bench.harness
 from datasets import load_dataset
+from utils.common_utils import load_json_file
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
@@ -13,11 +14,25 @@ if __name__ == '__main__':
     parser.add_argument('--hours_per_task', type=int, default=5, help='Hours allocated per task')
     parser.add_argument('--num_workers', type=int, default=10, help='Number of parallel workers for evaluation')
     parser.add_argument('--n_tasks', type=int, default=None, help='Number of tasks to evaluate on')
+    parser.add_argument('--instance_ids_file', type=str, default=None, help='Optional JSON file containing a list of instance_ids to evaluate.')
+    parser.add_argument('--exclude_verified_overlap', action='store_true', help='For SWE-bench Lite, exclude tasks that also appear in SWE-bench Verified.')
     args = parser.parse_args()
 
-    id = [task['instance_id'] for task in load_dataset(f'princeton-nlp/SWE-bench_{args.split}')['test']]
-    if args.n_tasks is not None:
-        id = id[:args.n_tasks]
+    if args.instance_ids_file:
+        id = load_json_file(args.instance_ids_file)
+    else:
+        id = [
+            task['instance_id']
+            for task in load_dataset(f'princeton-nlp/SWE-bench_{args.split}')['test']
+        ]
+        if args.exclude_verified_overlap:
+            verified_ids = {
+                task['instance_id']
+                for task in load_dataset('princeton-nlp/SWE-bench_Verified')['test']
+            }
+            id = [instance_id for instance_id in id if instance_id not in verified_ids]
+        if args.n_tasks is not None:
+            id = id[:args.n_tasks]
     hgm_utils.init(False, args.results_dir, id)
     agent_name = os.path.basename(args.agent_path)
     os.makedirs(os.path.join(args.results_dir, agent_name), exist_ok=True)

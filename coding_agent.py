@@ -5,6 +5,7 @@ import logging
 import os
 import subprocess
 import threading
+import sys
 from logging.handlers import RotatingFileHandler
 from time import time
 
@@ -50,13 +51,19 @@ def setup_logger(log_file="./chat_history.md", level=logging.INFO):
     # Create and set up file handler
     os.makedirs(os.path.dirname(log_file), exist_ok=True)
     file_handler = RotatingFileHandler(
-        log_file, maxBytes=10 * 1024 * 1024, backupCount=5
+        log_file, maxBytes=10 * 1024 * 1024, backupCount=5, encoding="utf-8"
     )
     file_handler.setLevel(level)
     file_handler.setFormatter(file_formatter)
 
+    console_handler = logging.StreamHandler(sys.stdout)
+    console_handler.setLevel(level)
+    console_handler.setFormatter(file_formatter)
+
     # Add handlers to logger
     logger.addHandler(file_handler)
+    logger.addHandler(console_handler)
+    logger.propagate = False
 
     # Store logger in thread-local storage
     set_thread_logger(logger)
@@ -69,8 +76,9 @@ def safe_log(message, level=logging.INFO):
     Thread-safe logging function that ensures messages go to the correct logger.
     """
     logger = get_thread_logger()
+    sanitized_message = str(message).encode("utf-8", "backslashreplace").decode("utf-8")
     if logger:
-        logger.log(level, message)
+        logger.log(level, sanitized_message)
     else:
         print(f"Warning: No logger found for thread {threading.get_ident()}")
 

@@ -77,8 +77,9 @@ def reset_to_commit(git_dname, commit):
     reset_cmd = ["git", "-C", git_dname, "reset", "--hard", commit]
     result_reset = subprocess.run(
         reset_cmd,
-        capture_output=True,
-        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        universal_newlines=True,
         check=False
     )
     if result_reset.returncode != 0:
@@ -90,8 +91,9 @@ def reset_to_commit(git_dname, commit):
     clean_cmd = ["git", "-C", git_dname, "clean", "-fd"]
     result_clean = subprocess.run(
         clean_cmd,
-        capture_output=True,
-        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        universal_newlines=True,
         check=False
     )
     if result_clean.returncode != 0:
