@@ -10,15 +10,16 @@ entrypoint is `initial_swe/miniswe_agent/src/coding_agent.py`.
 The implementation follows mini-SWE-agent's minimal control flow:
 
 1. Render a system message and task message.
-2. Query an OpenAI-compatible model.
-3. Parse exactly one shell action from a fenced `bash` block or `<bash>` block.
+2. Query an OpenAI-compatible model with a `bash` tool schema.
+3. Parse bash tool calls from the model response.
 4. Execute the action in the task repository.
-5. Append an observation message and save a trajectory.
+5. Append tool observation messages and save a trajectory.
 6. Stop when the action output starts with `COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT`
    or when limits are reached.
 
-HGM compatibility is preserved by always writing `model_patch.diff` from the
-task repo against `--base_commit`, even if the agent exits with an error.
+HGM compatibility is preserved by always writing `/hgm/model_patch.diff`. On
+successful submission this is the exact patch emitted by the agent; on failure
+or timeout it is empty so setup-time repository diffs are not submitted.
 
 ## Files Changed
 
@@ -87,7 +88,8 @@ python hgm.py --no_polyglot --initial_agent_name miniswe_agent
 
 - The implementation intentionally does not vendor mini-SWE-agent or depend on
   the mini-extra SWE-bench CLI.
-- Only shell text actions are supported; mini-SWE-agent's richer tool-call model
-  adapters are not copied.
+- The implementation uses the `openai` SDK directly against OpenAI-compatible
+  providers instead of depending on LiteLLM, to keep per-task runtime installs
+  small.
 - `hgm.py --initial_agent_name miniswe_agent` uses the supplied metadata stub
   unless the agent is evaluated separately with `evaluate_agent.py`.

@@ -13,21 +13,19 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 try:
-    import litellm
+    import openai
 except ImportError:  # pragma: no cover - requirements install should provide it.
-    litellm = None
+    openai = None
 
 try:
     from tenacity import (
         Retrying,
-        before_sleep_log,
         retry_if_not_exception_type,
         stop_after_attempt,
         wait_exponential,
     )
-except ImportError:  # pragma: no cover - litellm installs tenacity in normal use.
+except ImportError:  # pragma: no cover - requirements install should provide it.
     Retrying = None
-    before_sleep_log = None
     retry_if_not_exception_type = None
     stop_after_attempt = None
     wait_exponential = None
@@ -40,7 +38,9 @@ MAX_OUTPUT_CHARS = 20000
 DEFAULT_STEP_LIMIT = int(os.getenv("HGM_MINISWE_STEP_LIMIT", "250"))
 DEFAULT_COMMAND_TIMEOUT = int(os.getenv("HGM_MINISWE_COMMAND_TIMEOUT", "120"))
 DEFAULT_TIMEOUT_BUFFER = int(os.getenv("HGM_MINISWE_TIMEOUT_BUFFER", "60"))
-LITELLM_REQUEST_TIMEOUT = os.getenv("HGM_MINISWE_LITELLM_TIMEOUT")
+MODEL_REQUEST_TIMEOUT = os.getenv("HGM_MINISWE_REQUEST_TIMEOUT") or os.getenv(
+    "HGM_MINISWE_LITELLM_TIMEOUT"
+)
 PROGRESS_PREVIEW_CHARS = int(os.getenv("HGM_MINISWE_LOG_PREVIEW_CHARS", "240"))
 BASH_TOOL = {
     "type": "function",
@@ -96,14 +96,14 @@ def preview_text(value: Any, limit: int = PROGRESS_PREVIEW_CHARS) -> str:
 
 
 def request_timeout_value() -> Optional[float]:
-    if not LITELLM_REQUEST_TIMEOUT:
+    if not MODEL_REQUEST_TIMEOUT:
         return None
     try:
-        return float(LITELLM_REQUEST_TIMEOUT)
+        return float(MODEL_REQUEST_TIMEOUT)
     except ValueError:
         log_progress(
-            "invalid_litellm_timeout "
-            f"value={preview_text(LITELLM_REQUEST_TIMEOUT)} using=litellm_default"
+            "invalid_model_request_timeout "
+            f"value={preview_text(MODEL_REQUEST_TIMEOUT)} using=openai_default"
         )
         return None
 
@@ -152,14 +152,13 @@ def _retry_attempts(logger: logging.Logger):
     if Retrying is None:
         return [None]
     abort_exceptions = [KeyboardInterrupt]
-    if litellm is not None:
+    if openai is not None:
         abort_exceptions.extend(
             [
-                litellm.exceptions.UnsupportedParamsError,
-                litellm.exceptions.NotFoundError,
-                litellm.exceptions.PermissionDeniedError,
-                litellm.exceptions.ContextWindowExceededError,
-                litellm.exceptions.AuthenticationError,
+                openai.AuthenticationError,
+                openai.BadRequestError,
+                openai.NotFoundError,
+                openai.PermissionDeniedError,
             ]
         )
     return Retrying(
@@ -263,15 +262,15 @@ class MiniModel:
             self.resolved_model = self.model_name
             self.base_url = None
             self.api_key = None
-            self.model_kwargs = {}
+            self.client = None
             return
-        if litellm is None:
-            raise RuntimeError("The litellm package is required for coding_agent.py")
+        if openai is None:
+            raise RuntimeError("The openai package is required for coding_agent.py")
         self.provider = "openai"
         self.resolved_model = self.model_name
         self.base_url = None
         self.api_key = None
-        self.model_kwargs = {}
+        self.client = None
 
         if self.model_name.lower().startswith("vllm"):
             self.provider = "vllm"
@@ -286,27 +285,22 @@ class MiniModel:
             self.api_key = os.getenv("VLLM_API_KEY") or "dummy"
             explicit = self.model_name.split(":", 1)[1].strip() if ":" in self.model_name else ""
             self.resolved_model = explicit or os.getenv("VLLM_MODEL") or self.model_name
-            self.model_kwargs = {
-                "custom_llm_provider": "openai",
-                "api_base": self.base_url,
-                "api_key": self.api_key,
-                "drop_params": True,
-            }
+            self.client = openai.OpenAI(base_url=self.base_url, api_key=self.api_key)
             return
 
         if _is_openai_direct_model(self.model_name):
             self.api_key = os.getenv("OPENAI_API_KEY")
-            self.model_kwargs = {"api_key": self.api_key, "drop_params": True}
+            self.client = openai.OpenAI(api_key=self.api_key)
             return
 
         self.provider = "openrouter"
         self.base_url = "https://openrouter.ai/api/v1"
         self.api_key = os.getenv("OpenRouter_API_KEY")
         if self.model_name.startswith("openrouter/"):
-            self.resolved_model = self.model_name
+            self.resolved_model = self.model_name[len("openrouter/") :]
         else:
-            self.resolved_model = f"openrouter/{self.model_name}"
-        self.model_kwargs = {"api_key": self.api_key, "drop_params": True}
+            self.resolved_model = self.model_name
+        self.client = openai.OpenAI(base_url=self.base_url, api_key=self.api_key)
 
     def format_message(self, role: str, content: str, extra: Optional[dict] = None):
         message = {"role": role, "content": content}
@@ -341,7 +335,6 @@ class MiniModel:
             "model": self.resolved_model,
             "messages": self._api_messages(messages),
             "tools": [BASH_TOOL],
-            **self.model_kwargs,
         }
         request_timeout = request_timeout_value()
         if request_timeout is not None:
@@ -354,21 +347,21 @@ class MiniModel:
             "model_query_start "
             f"provider={self.provider} model={self.resolved_model} "
             f"messages={len(messages)} "
-            f"request_timeout={request_timeout if request_timeout is not None else 'litellm_default'} "
+            f"request_timeout={request_timeout if request_timeout is not None else 'openai_default'} "
             f"retry_attempts={os.getenv('MSWEA_MODEL_RETRY_STOP_AFTER_ATTEMPT', '10')}"
         )
         try:
             for attempt in _retry_attempts(logger):
                 if attempt is None:
-                    response = litellm.completion(**kwargs)
+                    response = self.client.chat.completions.create(**kwargs)
                 else:
                     with attempt:
-                        response = litellm.completion(**kwargs)
+                        response = self.client.chat.completions.create(**kwargs)
         except Exception as exc:
             log_progress(
                 "model_query_failed "
                 f"elapsed={time.time() - started:.2f}s "
-                f"request_timeout={request_timeout if request_timeout is not None else 'litellm_default'} "
+                f"request_timeout={request_timeout if request_timeout is not None else 'openai_default'} "
                 f"exception={type(exc).__name__}:{preview_text(exc)}"
             )
             raise
@@ -446,7 +439,7 @@ class MiniModel:
                         "provider": self.provider,
                         "base_url": self.base_url,
                     },
-                    "model_type": "hgm_miniswe.MiniModel",
+                    "model_type": "hgm_miniswe.OpenAICompatibleModel",
                 }
             }
         }
@@ -889,14 +882,14 @@ class AgenticSystem:
         out_path = str(Path(self.chat_history_file).with_suffix(".traj.json"))
         timeout_buffer = max(0, DEFAULT_TIMEOUT_BUFFER)
         wall_time_limit = max(0, int(timeout) - timeout_buffer)
-        litellm_timeout = request_timeout_value()
+        model_request_timeout = request_timeout_value()
         log_progress(
             "timeout_config "
             f"outer_timeout_seconds={int(timeout)} "
             f"buffer_seconds={timeout_buffer} "
             f"agent_wall_time_limit_seconds={wall_time_limit} "
             f"command_timeout_seconds={DEFAULT_COMMAND_TIMEOUT} "
-            f"litellm_request_timeout={litellm_timeout if litellm_timeout is not None else 'litellm_default'}"
+            f"model_request_timeout={model_request_timeout if model_request_timeout is not None else 'openai_default'}"
         )
         if wall_time_limit <= 0:
             log_progress(

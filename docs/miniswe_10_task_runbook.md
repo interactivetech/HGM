@@ -245,11 +245,11 @@ wall-time limit:
 export HGM_MINISWE_TIMEOUT_BUFFER=300
 ```
 
-Optionally set and log a LiteLLM request timeout. Leave unset to use LiteLLM's
-default timeout behavior:
+Optionally set and log the model request timeout. Leave unset to use the
+OpenAI-compatible client's default timeout behavior:
 
 ```bash
-export HGM_MINISWE_LITELLM_TIMEOUT=300
+export HGM_MINISWE_REQUEST_TIMEOUT=300
 ```
 
 Use a lower LLM call limit only for packaging smoke tests, not benchmark runs:
