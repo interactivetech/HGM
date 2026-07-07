@@ -1,0 +1,4 @@
+HGM-compatible mini-SWE-style integration package.
+
+This package contains local glue code for HGM evaluation. The control-flow
+pattern was informed by mini-SWE-agent, inspected as an external reference.
